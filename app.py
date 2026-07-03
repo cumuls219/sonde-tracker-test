@@ -807,7 +807,95 @@ def add_direction_guide(fig, df_display):
         ))
     return fig
 
-def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions=None, llj_layers=None, show_cloud=False, cloud_opacity=0.35, show_inversion=False, show_llj=False, show_direction=True, vertical_mode="실제 고도", map_floor_trace=None, floor_grid_traces=None, anim_row=None, anim_trail_df=None, show_sonde_icon=True, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0):
+
+def find_isotherm_crossings(df_display: pd.DataFrame, values=(-0.0, -10.0, -20.0)):
+    """기온이 지정값(℃)을 지나는 z_plot/고도 위치를 선형 보간으로 찾는다."""
+    if df_display is None or len(df_display) < 2 or "T(C)" not in df_display.columns:
+        return []
+    work = df_display.dropna(subset=["T(C)", "z_plot", "Alt(m)"]).copy()
+    if len(work) < 2:
+        return []
+    work = work.sort_values("Alt(m)").reset_index(drop=True)
+    out = []
+    for target in values:
+        tlabel = int(target)
+        found = []
+        for i in range(len(work) - 1):
+            r0 = work.iloc[i]
+            r1 = work.iloc[i + 1]
+            t0 = float(r0["T(C)"])
+            t1 = float(r1["T(C)"])
+            if not (np.isfinite(t0) and np.isfinite(t1)):
+                continue
+            # exact hit
+            if abs(t0 - target) < 1e-9:
+                frac = 0.0
+            elif (t0 - target) * (t1 - target) <= 0 and t0 != t1:
+                frac = (target - t0) / (t1 - t0)
+            else:
+                continue
+            frac = float(np.clip(frac, 0.0, 1.0))
+            alt = float(r0["Alt(m)"] + frac * (r1["Alt(m)"] - r0["Alt(m)"]))
+            z = float(r0["z_plot"] + frac * (r1["z_plot"] - r0["z_plot"]))
+            p = np.nan
+            if "P(hPa)" in work.columns:
+                try:
+                    p = float(r0["P(hPa)"] + frac * (r1["P(hPa)"] - r0["P(hPa)"]))
+                except Exception:
+                    p = np.nan
+            # 너무 가까운 중복 교차 제거
+            if not any(abs(alt - prev["alt_m"]) < 25 for prev in found):
+                found.append({"temp_c": float(target), "label": f"{tlabel}℃", "z": z, "alt_m": alt, "p_hpa": p})
+        out.extend(found)
+    return out
+
+
+def add_isotherm_surfaces(fig: go.Figure, crossings, x_range, y_range, opacity=0.22):
+    """0/-10/-20℃ 고도를 3D 공간의 반투명 수평면으로 추가한다."""
+    if not crossings or x_range is None or y_range is None:
+        return fig
+    color_map = {
+        0.0: "rgba(255,70,70,1.0)",
+        -0.0: "rgba(255,70,70,1.0)",
+        -10.0: "rgba(70,145,255,1.0)",
+        -20.0: "rgba(90,70,220,1.0)",
+    }
+    # surface는 colorscale을 요구하므로 값별 단색 scale로 처리
+    for c in crossings:
+        z = float(c["z"])
+        temp = float(c["temp_c"])
+        color = color_map.get(temp, "rgba(80,80,80,1.0)")
+        xs = np.linspace(float(x_range[0]), float(x_range[1]), 2)
+        ys = np.linspace(float(y_range[0]), float(y_range[1]), 2)
+        X, Y = np.meshgrid(xs, ys)
+        Z = np.full_like(X, z, dtype=float)
+        label = c.get("label", f"{temp:g}℃")
+        p_txt = "" if not np.isfinite(c.get("p_hpa", np.nan)) else f"<br>기압: {c['p_hpa']:.0f} hPa"
+        hover = f"{label} 등온면<br>고도: {c['alt_m']:.0f} m{p_txt}"
+        fig.add_trace(go.Surface(
+            x=X, y=Y, z=Z,
+            surfacecolor=np.zeros_like(Z),
+            colorscale=[[0, color], [1, color]],
+            opacity=float(opacity),
+            showscale=False,
+            name=f"{label} 등온면",
+            hovertemplate=hover + "<extra></extra>",
+        ))
+        # 우측 상단에 라벨을 얹어 회전해도 대략 어느 면인지 확인
+        fig.add_trace(go.Scatter3d(
+            x=[float(x_range[1])], y=[float(y_range[1])], z=[z],
+            mode="text",
+            text=[f"{label}면"],
+            textposition="middle right",
+            textfont=dict(size=13, color=color),
+            hoverinfo="skip",
+            showlegend=False,
+            name=f"{label} 라벨",
+        ))
+    return fig
+
+
+def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions=None, llj_layers=None, show_cloud=False, cloud_opacity=0.35, show_inversion=False, show_llj=False, show_direction=True, vertical_mode="실제 고도", map_floor_trace=None, floor_grid_traces=None, anim_row=None, anim_trail_df=None, show_sonde_icon=True, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22):
     fig = go.Figure()
     if map_floor_trace is not None:
         fig.add_trace(map_floor_trace)
@@ -971,6 +1059,10 @@ def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions
         z_range[0] = min(z_range[0], min(extra_z) - 0.03)
     zaxis_cfg.update(dict(range=z_range))
 
+    if show_isotherm_surfaces:
+        crossings = find_isotherm_crossings(df_display, values=(0.0, -10.0, -20.0))
+        add_isotherm_surfaces(fig, crossings, x_range, y_range, opacity=isotherm_opacity)
+
     is_logp = vertical_mode == "Skew-T형 Log-P"
     x_span = max((x_range[1] - x_range[0]) if x_range else 1.0, 0.1)
     y_span = max((y_range[1] - y_range[0]) if y_range else 1.0, 0.1)
@@ -1092,7 +1184,7 @@ def make_hodograph(df, display_df):
     return fig
 
 
-def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제 고도", map_floor_trace=None, floor_grid_traces=None, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0):
+def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제 고도", map_floor_trace=None, floor_grid_traces=None, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22):
     """시간 순서에 따라 존데 현재 위치 점이 이동하는 3D 애니메이션."""
     fig = go.Figure()
     if map_floor_trace is not None:
@@ -1210,6 +1302,9 @@ def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제
         y_range = [min(y_range[0], min(extra_y)), max(y_range[1], max(extra_y))]
     if z_range is not None and extra_z:
         z_range = [min(z_range[0], min(extra_z)-0.03), max(z_range[1], max(extra_z))]
+    if show_isotherm_surfaces:
+        crossings = find_isotherm_crossings(anim_df, values=(0.0, -10.0, -20.0))
+        add_isotherm_surfaces(fig, crossings, x_range, y_range, opacity=isotherm_opacity)
     zaxis_cfg.update(dict(range=z_range))
 
     is_logp = vertical_mode == "Skew-T형 Log-P"
@@ -1275,6 +1370,8 @@ with st.sidebar:
     st.header("4. 강조층·바람 표시")
     show_inversion_3d = st.checkbox("3D에서 역전층 강조", value=False)
     show_llj_3d = st.checkbox("3D에서 하층제트 강조", value=False)
+    show_isotherm_surfaces = st.checkbox("3D에서 0/-10/-20℃ 등온면 표시", value=False, help="기온이 0℃, -10℃, -20℃를 지나는 고도를 반투명 수평면으로 표시합니다.")
+    isotherm_opacity = st.slider("등온면 투명도", 0.08, 0.45, 0.22, 0.02)
     show_wind_panel = st.checkbox("바람깃 패널 표시", value=True)
     wind_panel_interval = st.selectbox("바람깃 표시 간격", [250, 500, 1000], index=1, format_func=lambda x: f"{x} m 간격")
     st.divider()
@@ -1454,11 +1551,11 @@ with tab1:
             )
             st.plotly_chart(wind_fig, use_container_width=True)
 
-        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor)
+        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
         with main_col:
             st.plotly_chart(fig, use_container_width=True)
     else:
-        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor)
+        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
         st.plotly_chart(fig, use_container_width=True)
 
     html = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
@@ -1474,7 +1571,7 @@ with tab_anim:
             anim_base = anim_base.iloc[::step].reset_index(drop=True)
         anim_df = prepare_vertical_axis(anim_base, vertical_mode)
         st.caption(f"애니메이션 프레임: {len(anim_df)}개 / 표시 간격: {anim_seconds}초 기준 / 지도는 현재 설정과 공간 여유 범위를 사용하되 Log-P에서는 자동 경량화가 적용됩니다.")
-        anim_fig = make_sonde_animation_fig(anim_df, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor)
+        anim_fig = make_sonde_animation_fig(anim_df, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
         st.plotly_chart(anim_fig, use_container_width=True)
     except Exception as e:
         st.warning("상승 애니메이션을 생성하지 못했습니다.")
