@@ -18,7 +18,7 @@ from analysis_utils import (
 st.set_page_config(page_title="Sonde Tracker RAW v6.8.16 Terrain Relief Map", page_icon="🎈", layout="wide")
 
 st.title("🎈 Sonde Tracker RAW v6.8.16 Terrain Relief Map")
-st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 표면 입체 지형 on/off, 지도 자동 경량화와 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
+st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 지명 표시, 지도 해상도 개선, 지도 자동 경량화와 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
 
 
 def metric_fmt(v, unit="", digits=1):
@@ -222,42 +222,13 @@ def _auto_map_bounds(df: pd.DataFrame, pad_ratio=0.12, min_span_deg=0.10,
 
 
 
-def _builtin_terrain_relief_km(lon2d, lat2d, lon0: float, lat0: float, strength: float = 0.55):
-    """지도 mesh 자체를 입체화하기 위한 내장 지형 모델.
-
-    외부 DEM 없이도 지도 위 지형감을 즉시 볼 수 있도록 부산·경남권 주요 산지와
-    광역적인 산악/해안 패턴을 합성한다. 실제 DEM 고도값은 아니지만,
-    지도 평면 위에 입체 relief가 직접 반영되도록 z값을 생성한다.
-    """
-    strength = max(0.0, float(strength))
-    x, y = _lonlat_to_xy_km(lon2d, lat2d, lon0, lat0)
-    relief = np.zeros_like(np.asarray(x, dtype=float), dtype=float)
-
-    peaks = [
-        (129.0556, 35.2830, 801, 7.0),   # 금정산
-        (129.1760, 35.1820, 634, 5.5),   # 장산
-        (129.0080, 35.1880, 642, 5.5),   # 백양산
-        (129.0820, 35.1570, 427, 4.5),   # 황령산
-        (129.1120, 35.4190, 922, 8.5),   # 천성산
-        (128.9820, 35.5450, 1189, 11.0), # 영남알프스권
-        (128.0800, 35.3350, 1915, 18.0), # 지리산권
-        (128.8300, 35.5350, 1189, 10.0), # 밀양 산지
-        (128.5000, 35.3200, 740, 9.0),   # 창녕/함안 산지
-    ]
-    for plon, plat, elev_m, sigma_km in peaks:
-        px, py = _lonlat_to_xy_km(plon, plat, lon0, lat0)
-        d2 = (x - float(px))**2 + (y - float(py))**2
-        relief += (elev_m / 1000.0) * np.exp(-d2 / (2.0 * sigma_km**2))
-
-    relief += 0.10 * (np.sin(x / 11.0) + np.cos(y / 9.0) + 0.5 * np.sin((x + y) / 13.0))
-    relief = np.clip(relief, 0.0, None)
-    if np.nanmax(relief) > 0:
-        relief = relief / np.nanmax(relief) * (0.18 + 0.62 * strength)
-    return relief
-
-
 def _add_place_labels_to_fig(fig, raw_df: pd.DataFrame, floor_z: float, show=True):
-    """지도 위에 주요 지명을 3D text로 직접 얹는다."""
+    """지도 위에 주요 지명을 x_km/y_km 좌표로 직접 표시한다.
+
+    지도 타일 지명이 3D mesh에서 흐리거나 가려질 때를 보완하기 위한 기능이다.
+    너무 먼 지명까지 억지로 넣으면 화면이 복잡해지므로, 발사점 주변 주요 지명과
+    현재 지도 범위 안에 들어오는 지명만 선별한다.
+    """
     if not show:
         return fig
     try:
@@ -265,6 +236,7 @@ def _add_place_labels_to_fig(fig, raw_df: pd.DataFrame, floor_z: float, show=Tru
         lon0 = float(raw_df["Lon(deg)"].iloc[0])
     except Exception:
         return fig
+
     labels = [
         ("발사점", lon0, lat0),
         ("부산", 129.0756, 35.1796),
@@ -280,22 +252,38 @@ def _add_place_labels_to_fig(fig, raw_df: pd.DataFrame, floor_z: float, show=Tru
         ("창녕", 128.4923, 35.5446),
         ("합천", 128.1658, 35.5666),
     ]
+
     xs, ys, zs, names = [], [], [], []
     for name, lon, lat in labels:
         x, y = _lonlat_to_xy_km(lon, lat, lon0, lat0)
-        xs.append(float(x)); ys.append(float(y)); zs.append(float(floor_z) + 0.42); names.append(name)
+        # 발사점은 항상 표시하고, 나머지는 주변 160km 이내만 표시해 화면 과밀을 줄임
+        if name != "발사점" and (abs(float(x)) > 160 or abs(float(y)) > 160):
+            continue
+        xs.append(float(x)); ys.append(float(y)); zs.append(float(floor_z) + 0.16); names.append(name)
+
+    if not xs:
+        return fig
+
+    # 글자만 있으면 지도 색과 섞일 수 있어 작은 흰색 마커를 같이 깔아 가독성을 확보
     fig.add_trace(go.Scatter3d(
         x=xs, y=ys, z=zs,
+        mode="markers",
+        marker=dict(size=4, color="rgba(255,255,255,0.92)", symbol="circle"),
+        name="지명 배경점",
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=xs, y=ys, z=[z + 0.035 for z in zs],
         mode="text",
         text=names,
-        textfont=dict(size=13, color="rgba(20,35,45,0.98)"),
-        textposition="middle center",
+        textfont=dict(size=16, color="rgba(5,20,30,0.98)"),
+        textposition="top center",
         name="지도 지명",
         hoverinfo="skip",
         showlegend=False,
     ))
     return fig
-
 
 
 def floor_z_for_display(df_display: pd.DataFrame, vertical_mode: str = "실제 고도"):
@@ -375,8 +363,7 @@ def _fetch_osm_static_map(bounds: dict, zoom: int, out_size: int = 1400):
 def make_map_floor_trace(raw_df: pd.DataFrame, display_df: pd.DataFrame, vertical_mode: str,
                          out_size: int = 1400, opacity: float = 0.76, grid_cells: int = 128,
                          pad_ratio: float = 0.12, min_span_deg: float = 0.10, max_tiles: int = 8,
-                         lat_pad_ratio=None, lon_pad_ratio=None, min_lat_span_deg=None, min_lon_span_deg=None,
-                         show_terrain_relief: bool = True, terrain_relief_strength: float = 0.55):
+                         lat_pad_ratio=None, lon_pad_ratio=None, min_lat_span_deg=None, min_lon_span_deg=None):
     """실제 OSM 정적 지도 1장을 3D 바닥면 Mesh3d로 변환한다.
 
     Plotly 3D에는 이미지 텍스처를 직접 까는 기능이 제한적이므로,
@@ -416,16 +403,10 @@ def make_map_floor_trace(raw_df: pd.DataFrame, display_df: pd.DataFrame, vertica
     ys = []
     zs = []
     floor_z, _ = floor_z_for_display(display_df, vertical_mode)
-    lon2d_v, lat2d_v = np.meshgrid(lons, lats)
-    terrain_z = np.zeros_like(lon2d_v, dtype=float)
-    if show_terrain_relief and float(terrain_relief_strength) > 0:
-        terrain_z = _builtin_terrain_relief_km(lon2d_v, lat2d_v, lon0, lat0, strength=terrain_relief_strength)
-        if vertical_mode == "Skew-T형 Log-P":
-            terrain_z *= 0.45
-    for ir, lat in enumerate(lats):
-        for ic, lon in enumerate(lons):
+    for lat in lats:
+        for lon in lons:
             x, y = _lonlat_to_xy_km(lon, lat, lon0, lat0)
-            xs.append(float(x)); ys.append(float(y)); zs.append(float(floor_z + terrain_z[ir, ic]))
+            xs.append(float(x)); ys.append(float(y)); zs.append(float(floor_z))
 
     i_list=[]; j_list=[]; k_list=[]; facecolors=[]
     for r in range(ny_cells):
@@ -448,10 +429,8 @@ def make_map_floor_trace(raw_df: pd.DataFrame, display_df: pd.DataFrame, vertica
         flatshading=True,
         opacity=opacity,
         hoverinfo="skip",
-        name="입체 지도" if show_terrain_relief else "바닥면 실제 지도",
+        name="바닥면 실제 지도",
         showlegend=True,
-        lighting=dict(ambient=0.50, diffuse=0.82, roughness=0.72, specular=0.18),
-        lightposition=dict(x=120, y=180, z=260),
     )
     return trace, bounds, zoom
 
@@ -1469,15 +1448,13 @@ with st.sidebar:
     show_floor_grid = st.checkbox("바닥면 기본 격자 표시", value=True, help="지도 사용 여부와 관계없이 바닥면 격자를 표시합니다. 지도 표시가 켜져 있으면 하늘색 옆면과 연직 격자도 함께 표시됩니다.")
     floor_grid_count = st.selectbox("바닥면 격자 밀도", [6, 8, 10, 12], index=1, format_func=lambda x: f"{x}분할")
     show_map_floor = st.checkbox("3D 바닥면 실제 지도 표시", value=True, help="외부망에서 OpenStreetMap 정적 지도 1장을 받아 3D 바닥면에 표시합니다. 실패해도 기본 격자는 표시됩니다.")
-    show_terrain_relief = st.checkbox("지도 위 입체 지형 표시", value=True, help="지도 mesh 자체의 높낮이를 만들어 바닥 지도를 입체적으로 표시합니다. 무겁거나 가릴 때는 끄세요.")
-    terrain_relief_strength = st.slider("입체 지형 높이", 0.0, 1.0, 0.55, 0.05, help="값이 클수록 산지 기복이 더 크게 보입니다. 0이면 평면 지도와 같습니다.")
     show_place_labels = st.checkbox("지도 위 지명 직접 표시", value=True, help="지도 타일 지명이 잘 안 보일 때 부산·김해·양산 등 주요 지명을 3D 텍스트로 직접 표시합니다.")
-    map_detail = st.selectbox("지도 선명도", ["표준", "지역명 선명", "고해상도"], index=1, help="기본은 지역명 선명입니다. 고해상도는 필요할 때만 사용하세요.")
+    map_detail = st.selectbox("지도 선명도", ["표준", "지역명 선명", "고해상도"], index=2, help="기본은 지역명 선명입니다. 고해상도는 필요할 때만 사용하세요.")
     map_context = st.selectbox("지도/공간 여유 범위", ["보통", "넓게", "아주 넓게"], index=1, help="궤적 주변만 딱 자르지 않고, 실제 지명과 위치를 가늠할 수 있도록 지도와 3D 공간을 넓게 잡습니다.")
     ns_context = st.selectbox("남북(위도) 방향 추가 확대", ["기본", "남북 넓게", "남북 아주 넓게"], index=1, help="존데 궤적은 동서보다 남북 위치감이 중요할 수 있어, 위도 방향의 지도/공간 범위를 별도로 더 넓힙니다.")
     auto_light_logp_map = st.checkbox("Log-P 모드에서 지도 자동 경량화", value=True, help="Skew-T형 Log-P에서는 화면이 길고 무거워질 수 있어 고해상도 지도/표면 품질을 자동으로 한 단계 낮춥니다.")
-    map_opacity = st.slider("지도 투명도", 0.30, 0.95, 0.78, 0.05)
-    map_grid_cells = st.selectbox("지도 표면 품질/무게", [80, 112, 144, 168], index=1, format_func=lambda x: f"기준 {x}셀")
+    map_opacity = st.slider("지도 투명도", 0.30, 0.95, 0.86, 0.05)
+    map_grid_cells = st.selectbox("지도 표면 품질/무게", [80, 112, 144, 168], index=2, format_func=lambda x: f"기준 {x}셀")
     st.divider()
 
     st.header("6. 상승 이동 표시")
@@ -1503,7 +1480,8 @@ if uploaded is None:
     - 오른쪽 바람깃 패널은 250~1000m 간격 대표값만 표시해 가볍게 유지
     - 바닥면 기본 격자는 항상 표시 가능
     - 지도 표시가 켜지면 하늘색 옆면과 연직 격자도 함께 표시
-    - 외부망에서 OpenStreetMap 정적 지도 1장을 3D 바닥면에 표시하고, 지도 mesh 자체를 입체 지형으로 on/off 가능
+    - 외부망에서 OpenStreetMap 정적 지도 1장을 3D 바닥면에 고해상도로 표시 가능
+    - 지도 타일 지명이 흐릴 경우 주요 지명을 3D 텍스트로 직접 표시
     - 지도 선명도 선택, Log-P 지도 자동 경량화, 경량 Plotly 상승 애니메이션 탭 제공
     - 열역학 분석은 해당 탭에서 버튼을 눌렀을 때 계산
     """)
@@ -1534,9 +1512,9 @@ floor_grid_traces = make_floor_grid_traces(display_df, vertical_mode=vertical_mo
 map_info_text = ""
 map_profiles = {
     # 기본값 자체를 이전보다 넓게 조정: 관측 궤적만 보이지 않고 주변 지명까지 보이도록 함
-    "표준": dict(out_size=1100, pad_ratio=0.22, min_span_deg=0.22, max_tiles=6),
-    "지역명 선명": dict(out_size=1500, pad_ratio=0.20, min_span_deg=0.18, max_tiles=8),
-    "고해상도": dict(out_size=1800, pad_ratio=0.18, min_span_deg=0.15, max_tiles=10),
+    "표준": dict(out_size=1200, pad_ratio=0.22, min_span_deg=0.22, max_tiles=6),
+    "지역명 선명": dict(out_size=1700, pad_ratio=0.20, min_span_deg=0.18, max_tiles=8),
+    "고해상도": dict(out_size=2200, pad_ratio=0.18, min_span_deg=0.15, max_tiles=10),
 }
 map_detail_effective = map_detail
 map_grid_cells_effective = map_grid_cells
@@ -1552,15 +1530,12 @@ if show_map_floor:
         map_floor_trace, map_bounds, map_zoom = make_map_floor_trace(
             raw_df, display_df, vertical_mode=vertical_mode,
             opacity=map_opacity, grid_cells=map_grid_cells_effective,
-            show_terrain_relief=show_terrain_relief,
-            terrain_relief_strength=terrain_relief_strength,
             **map_profile
         )
         suffix = ""
         if map_detail_effective != map_detail or map_grid_cells_effective != map_grid_cells:
             suffix = " (Log-P 자동 경량화 적용)"
-        relief_txt = f", 입체 지형 {'ON' if show_terrain_relief else 'OFF'}({terrain_relief_strength:.2f})"
-        map_info_text = f"바닥면 지도: OpenStreetMap 정적 타일 기반, zoom {map_zoom}, 선명도 {map_detail_effective}, 공간 {map_context}, 남북 {ns_context}, 표면 {map_grid_cells_effective}셀{relief_txt}{suffix}, © OpenStreetMap contributors"
+        map_info_text = f"바닥면 지도: OpenStreetMap 정적 타일 기반, zoom {map_zoom}, 선명도 {map_detail_effective}, 공간 {map_context}, 남북 {ns_context}, 표면 {map_grid_cells_effective}셀{suffix}, 주요 지명 직접 표시 {'ON' if show_place_labels else 'OFF'}, © OpenStreetMap contributors"
     except Exception as e:
         st.warning("바닥면 실제 지도를 불러오지 못했습니다. 진한 기본 바닥면 격자로 3D Tracker를 표시합니다.")
         st.caption(f"지도 오류: {e}")
