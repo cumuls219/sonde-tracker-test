@@ -15,10 +15,10 @@ from analysis_utils import (
     cloud_layers, inversion_layers, low_level_jet_layers, thermo_summary, layer_mean_table
 )
 
-st.set_page_config(page_title="Sonde Tracker RAW v6.8.18 Wind Barb Restore", page_icon="🎈", layout="wide")
+st.set_page_config(page_title="Sonde Tracker RAW v6.8.20 Sidebar UI", page_icon="🎈", layout="wide")
 
-st.title("🎈 Sonde Tracker RAW v6.8.18 Wind Barb Restore")
-st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 지명 표시, 지도 해상도 개선, 지도 자동 경량화, 기상학적 바람깃 방향 보정과 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
+st.title("🎈 Sonde Tracker RAW v6.8.20 Sidebar UI")
+st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 지명 표시, 지도 해상도 개선, 지도 자동 경량화, 기상학적 바람깃 방향 보정, 상단 발사 위치·시각 표시와 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
 
 
 def metric_fmt(v, unit="", digits=1):
@@ -283,7 +283,128 @@ def _add_place_labels_to_fig(fig, raw_df: pd.DataFrame, floor_z: float, show=Tru
         hoverinfo="skip",
         showlegend=False,
     ))
+
     return fig
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """두 위경도 사이의 대략적인 거리(km)를 계산한다."""
+    try:
+        lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
+    except Exception:
+        return float("inf")
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
+
+
+def infer_launch_admin_name(lat, lon):
+    """발사 좌표와 가장 가까운 시군구급 지역명을 반환한다.
+
+    외부 역지오코딩 API 없이 동남권 주요 시군구 중심 좌표로 추정한다.
+    실제 행정동 주소가 아니라 '좌표 기반 가까운 시군구' 표시용이다.
+    """
+    places = [
+        # 부산광역시 구·군
+        ("부산광역시 중구", 35.1062, 129.0323), ("부산광역시 서구", 35.0979, 129.0244),
+        ("부산광역시 동구", 35.1293, 129.0455), ("부산광역시 영도구", 35.0912, 129.0679),
+        ("부산광역시 부산진구", 35.1629, 129.0532), ("부산광역시 동래구", 35.2049, 129.0838),
+        ("부산광역시 남구", 35.1365, 129.0842), ("부산광역시 북구", 35.1972, 128.9901),
+        ("부산광역시 해운대구", 35.1631, 129.1635), ("부산광역시 사하구", 35.1046, 128.9748),
+        ("부산광역시 금정구", 35.2429, 129.0921), ("부산광역시 강서구", 35.2122, 128.9806),
+        ("부산광역시 연제구", 35.1762, 129.0797), ("부산광역시 수영구", 35.1456, 129.1132),
+        ("부산광역시 사상구", 35.1526, 128.9911), ("부산광역시 기장군", 35.2446, 129.2223),
+        # 울산광역시 구·군
+        ("울산광역시 중구", 35.5695, 129.3328), ("울산광역시 남구", 35.5438, 129.3301),
+        ("울산광역시 동구", 35.5047, 129.4167), ("울산광역시 북구", 35.5824, 129.3610),
+        ("울산광역시 울주군", 35.5221, 129.2422),
+        # 경상남도 시군
+        ("경상남도 창원시", 35.2279, 128.6811), ("경상남도 김해시", 35.2285, 128.8894),
+        ("경상남도 양산시", 35.3350, 129.0370), ("경상남도 밀양시", 35.5038, 128.7466),
+        ("경상남도 거제시", 34.8806, 128.6210), ("경상남도 통영시", 34.8544, 128.4332),
+        ("경상남도 진주시", 35.1800, 128.1076), ("경상남도 사천시", 35.0038, 128.0640),
+        ("경상남도 창녕군", 35.5446, 128.4923), ("경상남도 합천군", 35.5666, 128.1658),
+        ("경상남도 함안군", 35.2726, 128.4065), ("경상남도 의령군", 35.3222, 128.2617),
+        ("경상남도 고성군", 34.9730, 128.3223), ("경상남도 남해군", 34.8377, 127.8925),
+        ("경상남도 하동군", 35.0672, 127.7513), ("경상남도 산청군", 35.4156, 127.8735),
+        ("경상남도 함양군", 35.5204, 127.7252), ("경상남도 거창군", 35.6865, 127.9095),
+        # 인접 광역시·도 주요 지점
+        ("대구광역시 달서구", 35.8299, 128.5327), ("대구광역시 동구", 35.8867, 128.6356),
+        ("경상북도 경주시", 35.8562, 129.2247), ("경상북도 포항시", 36.0190, 129.3435),
+        ("전라남도 여수시", 34.7604, 127.6622), ("전라남도 순천시", 34.9506, 127.4872),
+    ]
+    try:
+        lat = float(lat); lon = float(lon)
+    except Exception:
+        return "지역명 미확인", None
+    best = min(places, key=lambda p: _haversine_km(lat, lon, p[1], p[2]))
+    dist = _haversine_km(lat, lon, best[1], best[2])
+    if dist <= 25:
+        return best[0], dist
+    return f"{best[0]} 인근", dist
+
+
+def _format_coord(v):
+    try:
+        return f"{float(v):.5f}°"
+    except Exception:
+        return "-"
+
+
+def parse_launch_time_strings(date_value):
+    """원시자료 Date 값을 UTC 기준으로 해석해 KST/UTC 문자열을 만든다.
+
+    UPP RAW의 Date는 운용 자료에서 UTC로 들어오는 경우가 많아, 화면에는 UTC와 KST를 함께 표시한다.
+    해석 실패 시 원문을 그대로 보여준다.
+    """
+    if date_value is None or str(date_value).strip() in ("", "None", "nan"):
+        return "-", "-"
+    raw = str(date_value).strip()
+    try:
+        dt = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(dt):
+            return "-", raw
+        # timezone 정보가 없으면 원시자료 Date를 UTC로 간주
+        if getattr(dt, "tzinfo", None) is not None:
+            dt_utc = dt.tz_convert("UTC") if hasattr(dt, "tz_convert") else dt
+        else:
+            dt_utc = dt.tz_localize("UTC")
+        dt_kst = dt_utc.tz_convert("Asia/Seoul")
+        return dt_kst.strftime("%Y-%m-%d %H:%M KST"), dt_utc.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return "-", raw
+
+
+def render_launch_header(raw_df: pd.DataFrame, info: dict):
+    """상단에 존데 발사 위치와 발사 시각을 표시한다."""
+    lat = info.get("latitude") if isinstance(info, dict) else None
+    lon = info.get("longitude") if isinstance(info, dict) else None
+    if lat is None or lon is None:
+        try:
+            lat = float(raw_df["Lat(deg)"].iloc[0])
+            lon = float(raw_df["Lon(deg)"].iloc[0])
+        except Exception:
+            lat, lon = None, None
+
+    admin_name, dist = infer_launch_admin_name(lat, lon) if lat is not None and lon is not None else ("지역명 미확인", None)
+    dist_txt = "" if dist is None else f" · 중심거리 약 {dist:.1f} km"
+    kst_txt, utc_txt = parse_launch_time_strings(info.get("date") if isinstance(info, dict) else None)
+
+    st.markdown(
+        f"""
+        <div style="border:1px solid rgba(90,120,150,0.32); border-radius:12px; padding:0.75rem 0.9rem; margin:0.35rem 0 0.65rem 0; background:rgba(245,249,252,0.86);">
+            <div style="font-size:0.96rem; line-height:1.75;">
+                <b>존데 발사 위치</b>: {admin_name}{dist_txt} / 위도 {_format_coord(lat)} / 경도 {_format_coord(lon)}<br>
+                <b>존데 발사 시각</b>: {kst_txt} / {utc_txt}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def floor_z_for_display(df_display: pd.DataFrame, vertical_mode: str = "실제 고도"):
@@ -1422,36 +1543,56 @@ with st.sidebar:
     uploaded = st.file_uploader("UPP RAW TXT 파일", type=["txt", "dat", "csv", "log"])
     st.caption("업로드 방식은 v1/v2와 동일합니다. 내부에서만 표시 자료를 줄입니다.")
     st.divider()
-    st.header("2. 경량 표시 설정")
+
+    st.header("2. 3D 기본 표시")
     display_mode = st.selectbox("3D 표시 간격", ["5초 간격", "10초 간격", "2초 간격", "고도 50m 간격", "고도 100m 간격", "전체"], index=0)
     vertical_mode = st.selectbox("3D 연직축 표현", ["실제 고도", "Skew-T형 Log-P"], index=0, help="기본은 실제 고도입니다. Skew-T형 Log-P는 P(hPa)만 사용하며 지상~100hPa 범위만 표시하고, 이때만 연직축을 길게 표현합니다.")
     color_col = st.selectbox("3D 색상 변수", ["T(C)", "U(%)", "Wspd(knot)", "Asc(m/m)"], index=0, format_func=variable_label)
     simple_hover = st.checkbox("간단 hover 사용", value=True)
     show_direction_guide = st.checkbox("동·서·남·북 방위 표시", value=True)
     st.divider()
-    st.header("3. 구름 가능층·강조 표시")
+
+    st.header("3. 구름 가능층")
     show_cloud_3d = st.checkbox("3D에서 구름 가능층 강조", value=True)
-    cloud_opacity = st.slider("구름 강조 투명도", 0.10, 0.90, 0.35, 0.05)
-    rh_th = st.slider("구름 판단 RH(상대습도) 기준(%)", 70, 100, 85, 1)
-    spread_th = st.slider("구름 판단 T-Td 기준(℃)", 0.5, 5.0, 2.0, 0.5)
-    min_cloud_thick = st.slider("구름 최소 층 두께(m)", 20, 300, 100, 10)
+    if show_cloud_3d:
+        cloud_opacity = st.slider("구름 강조 투명도", 0.10, 0.90, 0.35, 0.05)
+        rh_th = st.slider("구름 판단 RH(상대습도) 기준(%)", 70, 100, 85, 1)
+        spread_th = st.slider("구름 판단 T-Td 기준(℃)", 0.5, 5.0, 2.0, 0.5)
+        min_cloud_thick = st.slider("구름 최소 층 두께(m)", 20, 300, 100, 10)
+    else:
+        cloud_opacity = 0.35
+        rh_th = 85
+        spread_th = 2.0
+        min_cloud_thick = 100
     st.divider()
 
-    st.header("4. 강조층·바람 표시")
+    st.header("4. 강조층 표시")
     show_inversion_3d = st.checkbox("3D에서 역전층 강조", value=False)
-    show_llj_3d = st.checkbox("3D에서 하층제트 강조", value=False)
     show_isotherm_surfaces = st.checkbox("3D에서 0/-10/-20℃ 등온면 표시", value=False, help="기온이 0℃, -10℃, -20℃를 지나는 고도를 반투명 수평면으로 표시합니다.")
-    isotherm_opacity = st.slider("등온면 투명도", 0.08, 0.45, 0.22, 0.02)
+    if show_isotherm_surfaces:
+        isotherm_opacity = st.slider("등온면 투명도", 0.08, 0.45, 0.22, 0.02)
+    else:
+        isotherm_opacity = 0.22
+    st.divider()
+
+    st.header("5. 하층제트")
+    show_llj_3d = st.checkbox("3D에서 하층제트 강조", value=False)
+    llj_max_alt = st.slider("LLJ 탐지 상한고도(m)", 1000, 5000, 3000, 500)
+    llj_min_speed = st.slider("LLJ 최소 풍속(kt)", 10, 50, 20, 1)
+    llj_drop = st.slider("LLJ 풍속 감소 기준(kt)", 2, 20, 5, 1)
+    st.divider()
+
+    st.header("6. 바람깃")
     show_wind_panel = st.checkbox("바람깃 패널 표시", value=True)
     wind_panel_interval = st.selectbox("바람깃 표시 간격", [250, 500, 1000], index=1, format_func=lambda x: f"{x} m 간격")
     st.divider()
 
-    st.header("5. 바닥면 지도·격자")
+    st.header("7. 바닥면 지도·격자")
     show_floor_grid = st.checkbox("바닥면 기본 격자 표시", value=True, help="지도 사용 여부와 관계없이 바닥면 격자를 표시합니다. 지도 표시가 켜져 있으면 하늘색 옆면과 연직 격자도 함께 표시됩니다.")
     floor_grid_count = st.selectbox("바닥면 격자 밀도", [6, 8, 10, 12], index=1, format_func=lambda x: f"{x}분할")
     show_map_floor = st.checkbox("3D 바닥면 실제 지도 표시", value=True, help="외부망에서 OpenStreetMap 정적 지도 1장을 받아 3D 바닥면에 표시합니다. 실패해도 기본 격자는 표시됩니다.")
     show_place_labels = st.checkbox("지도 위 지명 직접 표시", value=True, help="지도 타일 지명이 잘 안 보일 때 부산·김해·양산 등 주요 지명을 3D 텍스트로 직접 표시합니다.")
-    map_detail = st.selectbox("지도 선명도", ["표준", "지역명 선명", "고해상도"], index=2, help="기본은 지역명 선명입니다. 고해상도는 필요할 때만 사용하세요.")
+    map_detail = st.selectbox("지도 선명도", ["표준", "지역명 선명", "고해상도"], index=2, help="기본은 고해상도입니다. 속도가 느리면 표준으로 낮추세요.")
     map_context = st.selectbox("지도/공간 여유 범위", ["보통", "넓게", "아주 넓게"], index=1, help="궤적 주변만 딱 자르지 않고, 실제 지명과 위치를 가늠할 수 있도록 지도와 3D 공간을 넓게 잡습니다.")
     ns_context = st.selectbox("남북(위도) 방향 추가 확대", ["기본", "남북 넓게", "남북 아주 넓게"], index=1, help="존데 궤적은 동서보다 남북 위치감이 중요할 수 있어, 위도 방향의 지도/공간 범위를 별도로 더 넓힙니다.")
     auto_light_logp_map = st.checkbox("Log-P 모드에서 지도 자동 경량화", value=True, help="Skew-T형 Log-P에서는 화면이 길고 무거워질 수 있어 고해상도 지도/표면 품질을 자동으로 한 단계 낮춥니다.")
@@ -1459,15 +1600,9 @@ with st.sidebar:
     map_grid_cells = st.selectbox("지도 표면 품질/무게", [80, 112, 144, 168], index=2, format_func=lambda x: f"기준 {x}셀")
     st.divider()
 
-    st.header("6. 상승 이동 표시")
+    st.header("8. 상승 이동 표시")
     anim_seconds = st.selectbox("상승 이동 표시 간격", [10, 20, 30, 60], index=2, format_func=lambda x: f"{x}초 간격")
     anim_max_frames = st.slider("상승 애니메이션 최대 프레임", 30, 100, 60, 10, help="애니메이션은 Plotly 내부 프레임으로 재생합니다. 기본 60프레임이 가장 안정적입니다.")
-    st.divider()
-
-    st.header("7. 하층제트 탐지")
-    llj_max_alt = st.slider("LLJ 탐지 상한고도(m)", 1000, 5000, 3000, 500)
-    llj_min_speed = st.slider("LLJ 최소 풍속(kt)", 10, 50, 20, 1)
-    llj_drop = st.slider("LLJ 풍속 감소 기준(kt)", 2, 20, 5, 1)
 
 if uploaded is None:
     st.info("왼쪽에서 UPP RAW 원시자료 TXT 파일을 업로드하세요.")
@@ -1542,6 +1677,9 @@ if show_map_floor:
         st.warning("바닥면 실제 지도를 불러오지 못했습니다. 진한 기본 바닥면 격자로 3D Tracker를 표시합니다.")
         st.caption(f"지도 오류: {e}")
         map_floor_trace = None
+
+# Launch header
+render_launch_header(raw_df, info)
 
 # Header metrics
 c1, c2, c3, c4, c5, c6 = st.columns(6)
