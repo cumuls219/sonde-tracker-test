@@ -15,10 +15,10 @@ from analysis_utils import (
     cloud_layers, inversion_layers, low_level_jet_layers, thermo_summary, layer_mean_table
 )
 
-st.set_page_config(page_title="Sonde Tracker RAW v6.8.16 Terrain Relief Map", page_icon="🎈", layout="wide")
+st.set_page_config(page_title="Sonde Tracker RAW v6.8.18 Wind Barb Restore", page_icon="🎈", layout="wide")
 
-st.title("🎈 Sonde Tracker RAW v6.8.16 Terrain Relief Map")
-st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 지명 표시, 지도 해상도 개선, 지도 자동 경량화와 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
+st.title("🎈 Sonde Tracker RAW v6.8.18 Wind Barb Restore")
+st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 지명 표시, 지도 해상도 개선, 지도 자동 경량화, 기상학적 바람깃 방향 보정과 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
 
 
 def metric_fmt(v, unit="", digits=1):
@@ -629,11 +629,13 @@ def _wind_barb_segments(wdf: pd.DataFrame, df_display: pd.DataFrame):
         wdir = float(r["Wdir(deg)"])
         z0 = float(r["z_plot"])
 
-        # 기상학적 풍향: 바람이 불어오는 방향. 표시용은 너무 과도하게 회전하지 않도록 축소.
+        # 기상학적 풍향: 바람이 불어오는 방향.
+        # 바람깃은 "불어오는 쪽"을 향해 보여야 하므로, 실제 이동성분(-sin/-cos)이 아니라
+        # 풍향 자체의 방향성(+sin/+cos)을 사용한다.
+        # 예: 270° 서풍 → 서쪽 방향, 0° 북풍 → 북쪽 방향.
         rad = np.deg2rad(wdir)
-        # 동서 성분 중심으로 좌우를 만들고, 남북 성분은 작은 기울기로만 표현
-        dx_raw = -np.sin(rad)
-        dy_raw = -np.cos(rad)
+        dx_raw = np.sin(rad)
+        dy_raw = np.cos(rad)
         if abs(dx_raw) < 0.28:
             dx_raw = 0.28 if dx_raw >= 0 else -0.28
         x1 = base_x + staff_len * np.sign(dx_raw)
