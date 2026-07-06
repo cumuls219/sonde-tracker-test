@@ -15,10 +15,10 @@ from analysis_utils import (
     cloud_layers, inversion_layers, low_level_jet_layers, thermo_summary, layer_mean_table
 )
 
-st.set_page_config(page_title="Sonde Tracker RAW v6.8.7 Animation Marker Camera Fix", page_icon="🎈", layout="wide")
+st.set_page_config(page_title="Sonde Tracker RAW v6.8.14 2.5D Wind/Map Fix", page_icon="🎈", layout="wide")
 
-st.title("🎈 Sonde Tracker RAW v6.8.7 Animation Marker Camera Fix")
-st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 오른쪽 기상청식 바람깃 패널, 3D 바닥면 실제 지도/기본 격자, 하늘색 측면 배경, 지도 자동 경량화와 3D Tracker 옆 클릭형 상승 이동 표시를 포함한 테스트용 버전입니다.")
+st.title("🎈 Sonde Tracker RAW v6.8.14 2.5D Wind/Map Fix")
+st.caption("UPP RAW 원시자료 업로드는 유지하고, 3D Tracker와 Log-P 연직축, 구름·역전층·하층제트 강조, 기상학적 바람깃 방향 보정, 하단 지도 지역명 표시, 가벼운 2.5D 지형감, 실제 지도/기본 격자, 상승 애니메이션을 포함한 개선 버전입니다.")
 
 
 def metric_fmt(v, unit="", digits=1):
@@ -565,11 +565,12 @@ def _wind_barb_segments(wdf: pd.DataFrame, df_display: pd.DataFrame):
         wdir = float(r["Wdir(deg)"])
         z0 = float(r["z_plot"])
 
-        # 기상학적 풍향: 바람이 불어오는 방향. 표시용은 너무 과도하게 회전하지 않도록 축소.
+        # 기상학적 풍향: 바람이 불어오는 방향.
+        # 바람깃 패널은 실제 이동 방향이 아니라 '불어오는 쪽'을 가리키도록 표시한다.
+        # 예: 270° 서풍은 서쪽을 향해, 0° 북풍은 북쪽을 향해 줄기가 놓인다.
         rad = np.deg2rad(wdir)
-        # 동서 성분 중심으로 좌우를 만들고, 남북 성분은 작은 기울기로만 표현
-        dx_raw = -np.sin(rad)
-        dy_raw = -np.cos(rad)
+        dx_raw = np.sin(rad)
+        dy_raw = np.cos(rad)
         if abs(dx_raw) < 0.28:
             dx_raw = 0.28 if dx_raw >= 0 else -0.28
         x1 = base_x + staff_len * np.sign(dx_raw)
@@ -808,6 +809,145 @@ def add_direction_guide(fig, df_display):
     return fig
 
 
+
+
+def xy_from_latlon_for_launch(df_display: pd.DataFrame, lat: float, lon: float):
+    """관측 시작점 기준 위·경도를 3D Tracker의 x/y km 좌표로 변환."""
+    if df_display is None or len(df_display) == 0:
+        return np.nan, np.nan
+    lat0 = float(pd.to_numeric(df_display["Lat(deg)"], errors="coerce").dropna().iloc[0])
+    lon0 = float(pd.to_numeric(df_display["Lon(deg)"], errors="coerce").dropna().iloc[0])
+    x = (float(lon) - lon0) * 111.32 * math.cos(math.radians(lat0))
+    y = (float(lat) - lat0) * 111.32
+    return x, y
+
+
+def add_place_labels_to_3d_scene(fig: go.Figure, df_display: pd.DataFrame, floor_z: float, x_range=None, y_range=None):
+    """3D 하단 지도 위에 주요 지역명을 직접 표시.
+
+    Plotly 3D 바닥면은 지도 타일의 지명이 회전·축척에 따라 잘 안 보일 수 있으므로,
+    부울경 주요 지명을 text trace로 얹어 위치감을 보강한다.
+    """
+    if df_display is None or len(df_display) == 0:
+        return fig
+
+    labels = [
+        {"name": "부산", "lat": 35.1796, "lon": 129.0756},
+        {"name": "김해", "lat": 35.2285, "lon": 128.8894},
+        {"name": "양산", "lat": 35.3350, "lon": 129.0370},
+        {"name": "울산", "lat": 35.5384, "lon": 129.3114},
+        {"name": "창원", "lat": 35.2279, "lon": 128.6811},
+        {"name": "밀양", "lat": 35.5038, "lon": 128.7466},
+        {"name": "거제", "lat": 34.8806, "lon": 128.6210},
+        {"name": "통영", "lat": 34.8544, "lon": 128.4332},
+        {"name": "진주", "lat": 35.1800, "lon": 128.1076},
+        {"name": "사천", "lat": 35.0036, "lon": 128.0644},
+        {"name": "창녕", "lat": 35.5446, "lon": 128.4923},
+        {"name": "합천", "lat": 35.5667, "lon": 128.1658},
+    ]
+
+    xs, ys, names = [], [], []
+    # 현재 표시 범위 안 또는 주변부에 있는 지명만 표시해 불필요하게 화면이 넓어지는 것을 방지
+    xr = x_range if x_range is not None else padded_range(df_display["x_km"], pad_ratio=0.25, min_pad=1.0)
+    yr = y_range if y_range is not None else padded_range(df_display["y_km"], pad_ratio=0.25, min_pad=1.0)
+    xpad = max((xr[1] - xr[0]) * 0.15, 5.0) if xr else 30.0
+    ypad = max((yr[1] - yr[0]) * 0.15, 5.0) if yr else 30.0
+
+    for p in labels:
+        try:
+            x, y = xy_from_latlon_for_launch(df_display, p["lat"], p["lon"])
+            if xr and yr:
+                if not (xr[0] - xpad <= x <= xr[1] + xpad and yr[0] - ypad <= y <= yr[1] + ypad):
+                    continue
+            xs.append(x); ys.append(y); names.append(p["name"])
+        except Exception:
+            continue
+
+    if not names:
+        return fig
+
+    fig.add_trace(go.Scatter3d(
+        x=xs, y=ys, z=[floor_z + 0.08 for _ in names],
+        mode="markers+text",
+        marker=dict(size=3, color="rgba(255,255,255,0.85)", line=dict(color="rgba(20,60,80,0.65)", width=1)),
+        text=names,
+        textposition="top center",
+        textfont=dict(size=12, color="rgba(20,55,75,0.96)"),
+        name="하단 지도 지역명",
+        hoverinfo="skip",
+        showlegend=True,
+    ))
+    return fig
+
+
+def add_light_terrain_shading_to_3d_scene(fig: go.Figure, x_range, y_range, floor_z: float, strength: float = 0.35, grid_size: int = 36):
+    """DEM 없이 가벼운 음영 surface를 추가해 하단 지도에 2.5D 지형감을 부여."""
+    if x_range is None or y_range is None or strength <= 0:
+        return fig
+    x_grid = np.linspace(float(x_range[0]), float(x_range[1]), int(grid_size))
+    y_grid = np.linspace(float(y_range[0]), float(y_range[1]), int(grid_size))
+    X, Y = np.meshgrid(x_grid, y_grid)
+    x_span = max(float(x_range[1] - x_range[0]), 0.001)
+    y_span = max(float(y_range[1] - y_range[0]), 0.001)
+
+    texture = (
+        np.sin((X - x_range[0]) / x_span * np.pi * 3.0)
+        + np.cos((Y - y_range[0]) / y_span * np.pi * 4.0)
+        + 0.45 * np.sin(((X - x_range[0]) / x_span + (Y - y_range[0]) / y_span) * np.pi * 3.0)
+    )
+    Z = floor_z + texture * 0.045 * float(strength)
+
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=Z,
+        surfacecolor=texture,
+        colorscale="Greys",
+        reversescale=True,
+        opacity=0.18,
+        showscale=False,
+        name="하단 지형감",
+        hoverinfo="skip",
+    ))
+    return fig
+
+
+def add_3d_wind_cones(fig: go.Figure, df_display: pd.DataFrame, wind_mode: str = "기상학적 방향", max_cones: int = 70):
+    """3D 궤적 주변에 풍향·풍속 cone을 추가.
+
+    - 기상학적 방향: 바람이 불어오는 쪽을 가리킴
+    - 실제 이동 방향: 공기가 이동하는 쪽을 가리킴
+    """
+    required = ["x_km", "y_km", "z_plot", "u_kt", "v_kt", "Wdir(deg)", "Wspd(knot)"]
+    if df_display is None or len(df_display) == 0 or any(c not in df_display.columns for c in required):
+        return fig
+    step = max(1, int(np.ceil(len(df_display) / max(1, int(max_cones)))))
+    wdf = df_display.iloc[::step].dropna(subset=required).copy()
+    if len(wdf) == 0:
+        return fig
+    if wind_mode == "기상학적 방향":
+        u = -wdf["u_kt"]
+        v = -wdf["v_kt"]
+        legend_name = "3D 바람깃(불어오는 방향)"
+    else:
+        u = wdf["u_kt"]
+        v = wdf["v_kt"]
+        legend_name = "3D 바람벡터(이동 방향)"
+    hover = [
+        f"고도: {r['Alt(m)']:.0f} m<br>풍향/풍속: {r['Wdir(deg)']:.0f}° / {r['Wspd(knot)']:.1f} kt<br>{wind_mode}"
+        for _, r in wdf.iterrows()
+    ]
+    fig.add_trace(go.Cone(
+        x=wdf["x_km"], y=wdf["y_km"], z=wdf["z_plot"],
+        u=u, v=v, w=np.zeros(len(wdf)),
+        sizemode="absolute", sizeref=0.16,
+        anchor="tail",
+        colorscale=[[0, "rgba(35,85,130,0.80)"], [1, "rgba(35,85,130,0.80)"]],
+        showscale=False,
+        name=legend_name,
+        text=hover,
+        hovertemplate="%{text}<extra></extra>",
+    ))
+    return fig
+
 def find_isotherm_crossings(df_display: pd.DataFrame, values=(-0.0, -10.0, -20.0)):
     """기온이 지정값(℃)을 지나는 z_plot/고도 위치를 선형 보간으로 찾는다."""
     if df_display is None or len(df_display) < 2 or "T(C)" not in df_display.columns:
@@ -895,7 +1035,7 @@ def add_isotherm_surfaces(fig: go.Figure, crossings, x_range, y_range, opacity=0
     return fig
 
 
-def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions=None, llj_layers=None, show_cloud=False, cloud_opacity=0.35, show_inversion=False, show_llj=False, show_direction=True, vertical_mode="실제 고도", map_floor_trace=None, floor_grid_traces=None, anim_row=None, anim_trail_df=None, show_sonde_icon=True, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22):
+def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions=None, llj_layers=None, show_cloud=False, cloud_opacity=0.35, show_inversion=False, show_llj=False, show_direction=True, vertical_mode="실제 고도", map_floor_trace=None, floor_grid_traces=None, anim_row=None, anim_trail_df=None, show_sonde_icon=True, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22, show_3d_wind_cones: bool = False, wind_vector_mode: str = "기상학적 방향", show_place_labels: bool = True, show_terrain_shading: bool = True, terrain_strength: float = 0.35):
     fig = go.Figure()
     if map_floor_trace is not None:
         fig.add_trace(map_floor_trace)
@@ -1057,6 +1197,15 @@ def make_3d_fig(df_display, color_col, simple_hover=True, cloud=None, inversions
         y_range = [min(y_range[0], min(extra_y)), max(y_range[1], max(extra_y))]
     if z_range is not None and extra_z:
         z_range[0] = min(z_range[0], min(extra_z) - 0.03)
+
+    floor_z_main, _ = floor_z_for_display(df_display, vertical_mode)
+    if show_terrain_shading:
+        add_light_terrain_shading_to_3d_scene(fig, x_range, y_range, floor_z_main, strength=terrain_strength)
+    if show_place_labels:
+        add_place_labels_to_3d_scene(fig, df_display, floor_z_main, x_range=x_range, y_range=y_range)
+    if show_3d_wind_cones:
+        add_3d_wind_cones(fig, df_display, wind_mode=wind_vector_mode)
+
     zaxis_cfg.update(dict(range=z_range))
 
     if show_isotherm_surfaces:
@@ -1184,7 +1333,7 @@ def make_hodograph(df, display_df):
     return fig
 
 
-def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제 고도", map_floor_trace=None, floor_grid_traces=None, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22):
+def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제 고도", map_floor_trace=None, floor_grid_traces=None, scene_context_factor: float = 1.0, ns_context_factor: float = 1.0, show_isotherm_surfaces: bool = False, isotherm_opacity: float = 0.22, show_place_labels: bool = True, show_terrain_shading: bool = True, terrain_strength: float = 0.35):
     """시간 순서에 따라 존데 현재 위치 점이 이동하는 3D 애니메이션."""
     fig = go.Figure()
     if map_floor_trace is not None:
@@ -1302,6 +1451,10 @@ def make_sonde_animation_fig(anim_df: pd.DataFrame, vertical_mode: str = "실제
         y_range = [min(y_range[0], min(extra_y)), max(y_range[1], max(extra_y))]
     if z_range is not None and extra_z:
         z_range = [min(z_range[0], min(extra_z)-0.03), max(z_range[1], max(extra_z))]
+    if show_terrain_shading:
+        add_light_terrain_shading_to_3d_scene(fig, x_range, y_range, floor_z, strength=terrain_strength)
+    if show_place_labels:
+        add_place_labels_to_3d_scene(fig, anim_df, floor_z, x_range=x_range, y_range=y_range)
     if show_isotherm_surfaces:
         crossings = find_isotherm_crossings(anim_df, values=(0.0, -10.0, -20.0))
         add_isotherm_surfaces(fig, crossings, x_range, y_range, opacity=isotherm_opacity)
@@ -1374,6 +1527,8 @@ with st.sidebar:
     isotherm_opacity = st.slider("등온면 투명도", 0.08, 0.45, 0.22, 0.02)
     show_wind_panel = st.checkbox("바람깃 패널 표시", value=True)
     wind_panel_interval = st.selectbox("바람깃 표시 간격", [250, 500, 1000], index=1, format_func=lambda x: f"{x} m 간격")
+    show_3d_wind_cones = st.checkbox("3D 궤적 바람깃 표시", value=False, help="3D 궤적 위에 풍향·풍속 cone을 표시합니다. 많으면 화면이 복잡해질 수 있어 필요할 때 켜세요.")
+    wind_vector_mode = st.radio("바람깃 방향", ["기상학적 방향", "실제 이동 방향"], index=0, help="기상학적 방향은 바람이 불어오는 쪽, 실제 이동 방향은 공기가 향해 가는 쪽입니다.")
     st.divider()
 
     st.header("5. 바닥면 지도·격자")
@@ -1386,6 +1541,9 @@ with st.sidebar:
     auto_light_logp_map = st.checkbox("Log-P 모드에서 지도 자동 경량화", value=True, help="Skew-T형 Log-P에서는 화면이 길고 무거워질 수 있어 고해상도 지도/표면 품질을 자동으로 한 단계 낮춥니다.")
     map_opacity = st.slider("지도 투명도", 0.30, 0.95, 0.78, 0.05)
     map_grid_cells = st.selectbox("지도 표면 품질/무게", [80, 112, 144, 168], index=1, format_func=lambda x: f"기준 {x}셀")
+    show_place_labels = st.checkbox("하단 지도 지역명 표시", value=True, help="지도 타일 지명이 잘 안 보일 때를 대비해 부울경 주요 지역명을 직접 표시합니다.")
+    show_terrain_shading = st.checkbox("하단 지도 지형감 표시", value=True, help="DEM 없이 가벼운 음영 surface로 바닥면에 입체감을 줍니다.")
+    terrain_strength = st.slider("지형감 강조", 0.0, 1.0, 0.35, 0.05)
     st.divider()
 
     st.header("6. 상승 이동 표시")
@@ -1408,8 +1566,9 @@ if uploaded is None:
     - Log-P 선택 시 P(hPa)만 이용하고 지상~100hPa 범위만 표시
     - 구름 가능층은 3D에서 직접 강조하고 투명도 조절 가능
     - 역전층/하층제트는 필요 시 3D에서 강조
-    - 오른쪽 바람깃 패널은 250~1000m 간격 대표값만 표시해 가볍게 유지
-    - 바닥면 기본 격자는 항상 표시 가능
+    - 오른쪽 바람깃 패널은 기상학적 방향으로 보정하고 250~1000m 간격 대표값만 표시
+    - 필요 시 3D 궤적 위에 바람깃 cone 표시 가능
+    - 바닥면 기본 격자, 지역명 직접 표시, 가벼운 2.5D 지형감 표시 가능
     - 지도 표시가 켜지면 하늘색 옆면과 연직 격자도 함께 표시
     - 외부망에서 OpenStreetMap 정적 지도 1장을 3D 바닥면에 표시 가능
     - 지도 선명도 선택, Log-P 지도 자동 경량화, 경량 Plotly 상승 애니메이션 탭 제공
@@ -1551,11 +1710,11 @@ with tab1:
             )
             st.plotly_chart(wind_fig, use_container_width=True)
 
-        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
+        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity, show_3d_wind_cones=show_3d_wind_cones, wind_vector_mode=wind_vector_mode, show_place_labels=show_place_labels, show_terrain_shading=show_terrain_shading, terrain_strength=terrain_strength)
         with main_col:
             st.plotly_chart(fig, use_container_width=True)
     else:
-        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
+        fig = make_3d_fig(display_df, color_col=color_col, simple_hover=simple_hover, cloud=clouds, inversions=inversions, llj_layers=llj_layers, show_cloud=show_cloud_3d, cloud_opacity=cloud_opacity, show_inversion=show_inversion_3d, show_llj=show_llj_3d, show_direction=show_direction_guide, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, anim_row=None, anim_trail_df=None, show_sonde_icon=False, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity, show_3d_wind_cones=show_3d_wind_cones, wind_vector_mode=wind_vector_mode, show_place_labels=show_place_labels, show_terrain_shading=show_terrain_shading, terrain_strength=terrain_strength)
         st.plotly_chart(fig, use_container_width=True)
 
     html = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
@@ -1571,7 +1730,7 @@ with tab_anim:
             anim_base = anim_base.iloc[::step].reset_index(drop=True)
         anim_df = prepare_vertical_axis(anim_base, vertical_mode)
         st.caption(f"애니메이션 프레임: {len(anim_df)}개 / 표시 간격: {anim_seconds}초 기준 / 지도는 현재 설정과 공간 여유 범위를 사용하되 Log-P에서는 자동 경량화가 적용됩니다.")
-        anim_fig = make_sonde_animation_fig(anim_df, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity)
+        anim_fig = make_sonde_animation_fig(anim_df, vertical_mode=vertical_mode, map_floor_trace=map_floor_trace, floor_grid_traces=floor_grid_traces, scene_context_factor=map_context_factor, ns_context_factor=ns_context_factor, show_isotherm_surfaces=show_isotherm_surfaces, isotherm_opacity=isotherm_opacity, show_place_labels=show_place_labels, show_terrain_shading=show_terrain_shading, terrain_strength=terrain_strength)
         st.plotly_chart(anim_fig, use_container_width=True)
     except Exception as e:
         st.warning("상승 애니메이션을 생성하지 못했습니다.")
